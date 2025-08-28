@@ -7,6 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from tavily import TavilyClient
 from pydantic import BaseModel, Field
+from tools.hotels_tool import search_hotels
+from langchain.agents import Tool
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -25,8 +27,8 @@ class AgentState(TypedDict):
     days: int
     attractions: List[Dict]
     urls: List[str]
-    # hotels: List[Dict]
-    # itinerary: Dict
+    hotels: List[Dict]
+    itinerary: Dict
 
 @tool
 def tavily_tool(query:str):
@@ -58,7 +60,13 @@ def scrape_webpage(url: str) -> str:
     except Exception as e:
         return f"Error scraping {url}: {e}"
 
-tools = [tavily_tool]
+hotels_tool = Tool(
+    name="search_hotels",
+    func=search_hotels,
+    description="Searches for hotels in a specified destination."
+)
+
+tools = [tavily_tool, hotels_tool]
 llm = llm.bind_tools(tools)
 
 prompt = ChatPromptTemplate.from_messages([
@@ -102,7 +110,7 @@ extraction_prompt = ChatPromptTemplate.from_messages([
 class AttractionSites(BaseModel):
     attractions: List[str] = Field(..., description="List of must-see tourist attractions")
 
-llm = ChatOpenAI(model="gpt-4o-mini")
+# llm = ChatOpenAI(model="gpt-4o-mini")
 structured_llm = llm.with_structured_output(AttractionSites)
 
 def extract_attractions_node(state: AgentState) -> AgentState:
@@ -119,19 +127,36 @@ def extract_attractions_node(state: AgentState) -> AgentState:
     unique_attractions = list(set(state["attractions"] + response.attractions))
     return {**state, "attractions": unique_attractions}
 
+hotels_prompt = ChatPromptTemplate.from_messages([
+    ("system", """
+    You are an AI that will use the provided destination and the tool hotels_tool for extracting hotel info.
+    """),
+    ("human","""
+        Destination: {destination}
+        """
+    )
+])
+
+def hotel_info_node(state: AgentState) -> AgentState:
+    hotel_info = search_hotels(state["destination"])
+    return {**state, "hotels": hotel_info}
+
 graph = StateGraph(AgentState)
 
 graph.add_node("attractions_node", search_node)
+graph.add_node("hotel_info_node", hotel_info_node)
 graph.set_entry_point("attractions_node")
 
-graph.add_edge("attractions_node", END)
+graph.add_edge("attractions_node", "hotel_info_node")
+graph.add_edge("hotel_info_node", END)
 
 app = graph.compile()
 
 inputs = {
     "destination": "Dubai",
     "days": 3,
-    "attractions": []
+    "attractions": [],
+    "hotels": []
 }
 
 response = app.invoke(inputs)
